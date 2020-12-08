@@ -36,7 +36,7 @@ class _CashedSerializerBase:
 
     def __new__(cls, *args, **kwargs):
         # We override this method in order to automagically create
-        # `ListSerializer` classes instead when `many=True` is set.
+        # `CachedSerializer` classes instead when `many=True` is set.
         if kwargs.pop('many', False):
             return cls.many_init(*args, **kwargs)
         return super().__new__(cls, *args, **kwargs)
@@ -112,13 +112,12 @@ class _CashedSerializerBase:
             cls.get_cache().delete_many(cls._context_cache_keys, cls._cache_version)
             cls._context_cache_keys = set()
 
-    @classmethod
-    def invalidate_cache(cls, *instance):
+    def invalidate_cache(self, *instance: Model):
         if len(instance) == 1:
-            return cls._cache.delete(cls._generate_cache_key(instance[0]), version=cls._cache_version)
+            return self._cache.delete(self._generate_cache_key(instance[0]), version=self._cache_version)
         else:
-            keys = list(map(cls._generate_cache_key, instance))
-            return cls._cache.delete_many(keys, cls._cache_version)
+            keys = list(map(self._generate_cache_key, instance))
+            return self._cache.delete_many(keys, self._cache_version)
 
     @classmethod
     def get_cache(cls) -> BaseCache:
@@ -216,7 +215,7 @@ def _decorate_serializer_class(name: str,
 
 class CashedSerializerMeta(SerializerMetaclass):
 
-    def __new__(mcs, name, bases, dict_: Dict, *args, **kwargs):
+    def __new__(mcs, name, bases, dict_: Dict, *args, **kwargs) -> (Type[Serializer], Type[_CashedSerializerBase]):
         cache: Optional[Union[str, BaseCache]] = None
         key_prefix: str = "sercache"
         cache_timeout: int = 60 * 60 * 24
