@@ -1,13 +1,13 @@
+import datetime
 from abc import abstractmethod
 from collections import OrderedDict
 from contextlib import contextmanager
+from typing import Optional, Type, Union, Callable, Dict, List
 
 from django.core.cache import caches, cache as default_cache
 from django.core.cache.backends.base import BaseCache
 from django.db.models import Model
 from rest_framework.serializers import ModelSerializer, Serializer, BaseSerializer, SerializerMetaclass, ListSerializer, LIST_SERIALIZER_KWARGS
-from typing import Optional, Type, Union, Callable, Dict, List, Any
-import datetime
 
 
 def _first_true(iterable, default=False, pred=None):
@@ -127,12 +127,12 @@ class _CashedSerializerBase:
 
 class CachedListSerializer(ListSerializer):
 
-    def __init__(self, *args, use_cache=True, **kwargs):
+    def __init__(self, *args, cache_scope=False, **kwargs):
         super().__init__(*args, **kwargs)
-        self._use_cache = use_cache
+        self._cache_scope = cache_scope
 
     def to_representation(self, data):
-        if self._use_cache:
+        if self._cache_scope:
             with self.child.cache_scope():
                 return super().to_representation(data)
         else:
@@ -205,7 +205,6 @@ def _decorate_serializer_class(name: str,
     extra["to_representation"] = _to_representation
 
     if auto_invalidate:
-
         def _update(self, instance, validated_data):
             self.invalidate_cache(instance)
             return org_update(self, instance, validated_data)
