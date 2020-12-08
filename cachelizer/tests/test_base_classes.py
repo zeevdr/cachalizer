@@ -1,22 +1,23 @@
 from django.test import TestCase
 
-# Create your tests here.
-from rest_framework import serializers
-
-from cachelizer.cache_serializer import cached_serializer
+from cachelizer.cache_serializer import CashedModelSerializer
 from cachelizer.models import Person, Group
 
 
-@cached_serializer
-class PersonModelSerializer(serializers.ModelSerializer):
+# Create your tests here.
+
+
+class PersonModelSerializer(CashedModelSerializer):
 
     class Meta:
         model = Person
         fields = ("id", "first_name", "last_name",)
 
+    def to_representation(self, instance):
+        return super().to_representation(instance)
 
-@cached_serializer
-class GroupModelSerializer(serializers.ModelSerializer):
+
+class GroupModelSerializer(CashedModelSerializer):
     people = PersonModelSerializer(many=True)
 
     class Meta:
@@ -24,7 +25,7 @@ class GroupModelSerializer(serializers.ModelSerializer):
         fields = ("id", "name", "people",)
 
 
-class DecoratorTestCase(TestCase):
+class BaseClassTestCase(TestCase):
 
     def setUp(self):
         PersonModelSerializer.get_cache().clear()
@@ -62,5 +63,3 @@ class DecoratorTestCase(TestCase):
         data1 = sr1.data
 
         self.assertDictEqual(data1, expected_data2)
-
-        PersonModelSerializer([self.person_1], many=True).invalidate_cache()

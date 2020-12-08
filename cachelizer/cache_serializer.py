@@ -7,6 +7,7 @@ from typing import Optional, Type, Union, Callable, Dict, List
 from django.core.cache import caches, cache as default_cache
 from django.core.cache.backends.base import BaseCache
 from django.db.models import Model
+from django.conf import settings
 from rest_framework.serializers import ModelSerializer, Serializer, BaseSerializer, SerializerMetaclass, ListSerializer, LIST_SERIALIZER_KWARGS
 
 
@@ -34,21 +35,21 @@ class _CashedSerializerBase:
     _cache_version = None
     model: Model
 
-    def __new__(cls, *args, **kwargs):
+    def __new__(cls, *args, cache_scope=False, **kwargs):
         # We override this method in order to automagically create
         # `CachedSerializer` classes instead when `many=True` is set.
         if kwargs.pop('many', False):
-            return cls.many_init(*args, **kwargs)
+            return cls.many_init(*args, cache_scope=cache_scope, **kwargs)
         return super().__new__(cls, *args, **kwargs)
 
-    def __init__(self, *args, use_cache: Union[bool, str] = True, **kwargs) -> None:
+    def __init__(self, *args, use_cache: Union[bool, str] = True, cache_scope=False, **kwargs) -> None:
         if isinstance(use_cache, bool):
             use_cache = "true" if use_cache else "false"
         self._use_cache = use_cache
         super().__init__(*args, **kwargs)
 
     @classmethod
-    def many_init(cls, *args, **kwargs):
+    def many_init(cls, *args, cache_scope=False, **kwargs):
         """
         This method implements the creation of a `ListSerializer` parent
         class when `many=True` is used. You can customize it if you need to
@@ -68,6 +69,7 @@ class _CashedSerializerBase:
         child_serializer = cls(*args, **kwargs)
         list_kwargs = {
             'child': child_serializer,
+            'cache_scope': cache_scope
         }
         if allow_empty is not None:
             list_kwargs['allow_empty'] = allow_empty
@@ -85,18 +87,20 @@ class _CashedSerializerBase:
     def _get_do_use_cache(self) -> bool:
         return self._use_cache == "true" or (self._use_cache == "scoped_only" and self._is_in_scope())
 
+    @classmethod
     @abstractmethod
-    def _generate_cache_key(self, instance) -> str:
+    def _generate_cache_key(cls, instance) -> str:
         pass
 
-    def _get_cache_key_prefix(self) -> str:
-        if self._context_cache_count > 0:
-            return f"{self._key_prefix}_{self._context_cache_prefix}_{self.__class__.__name__.lower()}"
+    @classmethod
+    def _get_cache_key_prefix(cls) -> str:
+        if cls._context_cache_count > 0:
+            return f"{cls._key_prefix}_{cls._context_cache_prefix}_{cls.__class__.__name__.lower()}"
         else:
-            return f"{self._key_prefix}_{self.__class__.__name__.lower()}"
+            return f"{cls._key_prefix}_{cls.__class__.__name__.lower()}"
 
     def _cache_add(self, key, value):
-        self._cache.add(key, value, self._cache_timeout, self._cache_version)
+        self.get_cache().add(key, value, self._cache_timeout, self._cache_version)
         if self._context_cache_count > 0:
             self._context_cache_keys.add(key)
 
@@ -112,15 +116,13 @@ class _CashedSerializerBase:
             cls.get_cache().delete_many(cls._context_cache_keys, cls._cache_version)
             cls._context_cache_keys = set()
 
-    def invalidate_cache(self, *instance: Model):
-        if len(instance) == 1:
-            return self._cache.delete(self._generate_cache_key(instance[0]), version=self._cache_version)
-        else:
-            keys = list(map(self._generate_cache_key, instance))
-            return self._cache.delete_many(keys, self._cache_version)
+    def invalidate_cache(self):
+        return self._cache.delete(self._generate_cache_key(self.instance), version=self._cache_version)
 
     @classmethod
     def get_cache(cls) -> BaseCache:
+        if isinstance(cls._cache, str):
+            cls._cache = caches[cls._cache]
         return cls._cache
 
 
@@ -130,6 +132,9 @@ class CachedListSerializer(ListSerializer):
         super().__init__(*args, **kwargs)
         self._cache_scope = cache_scope
 
+    def _generate_cache_key(self, instance) -> str:
+        return self.child._generate_cache_key(instance)
+
     def to_representation(self, data):
         if self._cache_scope:
             with self.child.cache_scope():
@@ -137,25 +142,46 @@ class CachedListSerializer(ListSerializer):
         else:
             return super().to_representation(data)
 
+    def invalidate_cache(self):
+        keys = list(map(self._generate_cache_key, self.instance))
+        return self.child._cache.delete_many(keys, self.child._cache_version)
+
 
 class __CashedRegularSerializer(_CashedSerializerBase):
+
+    @classmethod
     def _generate_cache_key_model_serializer(cls: (Type[ModelSerializer], Type["_CashedSerializerBase"]),
                                              instance) -> str:
         model = getattr(cls.Meta, 'model')
         return f"{cls._get_cache_key_prefix()}_{model._meta.verbose_name}_#{hash(instance)}"
 
-    def _generate_cache_key(self, instance) -> str:
-        return f"{self._get_cache_key_prefix()}_#{hash(instance)}"
+    @classmethod
+    def _generate_cache_key(cls, instance) -> str:
+        return f"{cls._get_cache_key_prefix()}_#{hash(instance)}"
 
 
 class __CashedModelSerializer(_CashedSerializerBase):
 
-    def _get_model(self) -> Type[Model]:
-        return getattr(self.Meta, 'model')
+    @classmethod
+    def _get_model(cls) -> Type[Model]:
+        return getattr(cls.Meta, 'model')
 
-    def _generate_cache_key(self, instance) -> str:
-        model = self._get_model()
-        return f"{self._get_cache_key_prefix()}_{model._meta.verbose_name}_#{hash(instance)}"
+    @classmethod
+    def _generate_cache_key(cls, instance) -> str:
+        model = cls._get_model()
+        return f"{cls._get_cache_key_prefix()}_{model._meta.verbose_name}_#{hash(instance)}"
+
+
+def _to_representation_helper(self: _CashedSerializerBase, instance, org_to_representation: Callable):
+    if not self._get_do_use_cache():
+        return org_to_representation(self, instance)
+
+    key = self._generate_cache_key(instance)
+    if key in self._cache:
+        return self._cache.get(key)
+    rep = org_to_representation(self, instance)
+    self._cache_add(key, rep)
+    return rep
 
 
 def _decorate_serializer_class(name: str,
@@ -170,7 +196,7 @@ def _decorate_serializer_class(name: str,
                                auto_invalidate=False,
                                dict_=None,
                                ) -> (Type[BaseSerializer], Type[_CashedSerializerBase],):
-    cache = cache or default_cache
+    cache = cache or settings.CACHELIZER_DEFAULT_CACHE
     if cache is str:
         cache = caches[cache]
     dict_ = dict_ or {}
@@ -191,15 +217,7 @@ def _decorate_serializer_class(name: str,
         raise ValueError("can only decorate serializer class")
 
     def _to_representation(self, instance):
-        if not self._get_do_use_cache():
-            return org_to_representation(self, instance)
-
-        key = self._generate_cache_key(instance)
-        if key in self._cache:
-            return self._cache.get(key)
-        rep = org_to_representation(self, instance)
-        self._cache_add(key, rep)
-        return rep
+        return _to_representation_helper(self, instance, org_to_representation)
 
     extra["to_representation"] = _to_representation
 
@@ -263,3 +281,13 @@ def cached_serializer(cls: Type[Serializer],
                                       serializer_type, cache=cache, key_prefix=key_prefix,
                                       cache_timeout=cache_timeout, cache_version=cache_version,
                                       auto_invalidate=auto_invalidate)
+
+
+class CashedSerializer(__CashedRegularSerializer, Serializer):
+    def to_representation(self, instance):
+        return _to_representation_helper(self, instance, Serializer.to_representation)
+
+
+class CashedModelSerializer(__CashedModelSerializer, ModelSerializer):
+    def to_representation(self, instance):
+        return _to_representation_helper(self, instance, ModelSerializer.to_representation)

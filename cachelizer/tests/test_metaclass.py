@@ -3,8 +3,8 @@ from django.test import TestCase
 # Create your tests here.
 from rest_framework import serializers
 
-from main.cache_serializer import CashedSerializerMeta
-from main.models import Person, Group
+from cachelizer.cache_serializer import CashedSerializerMeta
+from cachelizer.models import Person, Group
 
 
 class PersonModelSerializer(serializers.ModelSerializer, metaclass=CashedSerializerMeta):
@@ -29,9 +29,10 @@ class MetaClassTestCase(TestCase):
 
     def setUp(self):
         PersonModelSerializer.get_cache().clear()
-        self.group_1 = Group.objects.create(name="Some Group")
-        self.person_1 = Person.objects.create(first_name="John", last_name="Doa", group=self.group_1)
-        self.person_2 = Person.objects.create(first_name="David", last_name="Dodo", group=self.group_1)
+        self.group_1: Group = Group.objects.create(name="Some Group")
+        self.person_1 = Person.objects.create(first_name="John", last_name="Doa")
+        self.person_2 = Person.objects.create(first_name="David", last_name="Dodo")
+        self.group_1.people.add(self.person_1, self.person_2)
 
     def test_person_serializer(self):
         expected_data1 = {"id": self.person_1.id,
@@ -57,7 +58,7 @@ class MetaClassTestCase(TestCase):
         expected_data2 = {"id": self.person_1.id,
                           "first_name": "john", "last_name": "Doa"}
 
-        PersonModelSerializer.invalidate_cache(self.person_1)
+        PersonModelSerializer(self.person_1).invalidate_cache()
         sr1 = PersonModelSerializer(self.person_1)
         data1 = sr1.data
 
